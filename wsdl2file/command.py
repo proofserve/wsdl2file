@@ -14,18 +14,29 @@ import site
 import sys
 
 from lxml import etree
-from requests import Session
 from requests.exceptions import HTTPError
+from requests_file import FileAdapter
+import requests
 
 if __name__ == "__main__":
     sys.path.insert(0, Path(__file__).parent.parent)
     importlib.reload(site)
 
 from wsdl2file.clark import clark, declark
+from wsdl2file.const import WSDL_NS, XSD_NS
 import wsdl2file.zeep as z
+
 
 LOGGER = logging.getLogger()
 LOG_FORMAT = "%(asctime)s [%(process)d] [%(levelname)s] [%(name)s] %(message)s"
+
+
+class Session(requests.Session):
+    def __init__(self, *args, cert=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        if cert:
+            self.cert = cert
+        self.mount("file://", FileAdapter())
 
 
 class ArgumentParser(argparse.ArgumentParser):
@@ -56,6 +67,7 @@ class ArgumentParser(argparse.ArgumentParser):
         options.log_level = options.log_level.upper()
         url = urlparse(options.url)
         if not url.scheme:
+            url = urlparse(str(Path(options.url).resolve()))
             options.url = url._replace(scheme="file").geturl()
         return options
 
@@ -87,6 +99,7 @@ class DocumentLoader:
         self.seen.add(response.url)
         return document, response.url
 
+
 class ClarkDocumentLoader(DocumentLoader):
     """DocumentLoader that converts certain attributes of certain tags
     to Clark Notation.
@@ -107,7 +120,7 @@ class ClarkDocumentLoader(DocumentLoader):
                         values are lists of attribute names
         """
         self.attribute_map = attribute_map
-        super().__init__()
+        super().__init__(session=session)
 
 
     def load_xml(self, *args, **kwargs):
@@ -117,31 +130,24 @@ class ClarkDocumentLoader(DocumentLoader):
         return document, url
 
 
-def element_url(ele):
-    url = ele.attrib.get('location')
-    if not url:
-        url = ele.attrib.get('schemaLocation')
-    if not url:
-        return
-    return url
-
-
 def get_references(document):
     "Return any WSDL include tags found in `document`"
     tree = document.getroot()
     references = []
-    wsdl = tree.find('{http://schemas.xmlsoap.org/wsdl/}import')
-    if wsdl is not None:
+    wsdls = (
+        tree.findall(f'{{{WSDL_NS}}}import') +
+        tree.findall(f'{{{WSDL_NS}}}include'))
+    for wsdl in wsdls:
         references.append(wsdl)
-    if tree.tag == '{http://www.w3.org/2001/XMLSchema}schema':
+    if tree.tag == f'{{{XSD_NS}}}schema':
         schemas = [tree]
     else:
-        schemas = tree.findall('.//{http://www.w3.org/2001/XMLSchema}schema')
+        schemas = tree.findall(f'.//{{{XSD_NS}}}schema')
     for schema in schemas:
-        imports = schema.findall('{http://www.w3.org/2001/XMLSchema}import')
+        imports = schema.findall(f'{{{XSD_NS}}}import')
         references += imports
     for schema in schemas:
-        includes = schema.findall('{http://www.w3.org/2001/XMLSchema}include')
+        includes = schema.findall(f'{{{XSD_NS}}}include')
         references += includes
     return references
 
@@ -155,9 +161,14 @@ def url2abs(url, base_url):
     return url
 
 
-def fix_references(references, base_url):
-    "Make any relative references in `references` absolute"
+def fix_references(doc, references, base_url):
+    """
+    1. Make any relative references in `references` absolute
+    2. Change <wsdl:import>s that import to XSD schemas
+    """
     LOGGER.debug("Fixing references for %s", base_url)
+    types_tag = doc.find(f"./{{{WSDL_NS}}}types")
+    xsd_fixed = 0
     for ele in references:
         for attr in {'location', 'schemaLocation'}:
             url = ele.attrib.get(attr)
@@ -166,15 +177,122 @@ def fix_references(references, base_url):
                 if url != new_url:
                     LOGGER.debug("%s: %s -> %s", base_url, url, new_url)
                     ele.set(attr, new_url)
+        loc = ele.attrib.get("location", "")
+        if ele.tag == f"{{{WSDL_NS}}}import" and loc.endswith(".xsd"):
+            schema_tag = etree.Element(f"{{{XSD_NS}}}schema")
+            import_tag = etree.Element(f"{{{XSD_NS}}}import")
+            import_tag.attrib["namespace"] = ele.attrib["namespace"]
+            import_tag.attrib["schemaLocation"] = ele.attrib["location"]
+            schema_tag.append(import_tag)
+            if types_tag is None:
+                types_tag = etree.Element(f"{{{WSDL_NS}}}types")
+                doc.getroot().insert(0, types_tag)
+            types_tag.insert(xsd_fixed, schema_tag)
+            xsd_fixed += 1
+            ele.getparent().remove(ele)
+            LOGGER.debug("%s: moved from WSDL import to XS import", loc)
 
-def include_url(ele):
-    "Return the URL that XML tag `include` references"
-    url = ele.attrib.get('location')
-    if not url:
-        url = ele.attrib.get('schemaLocation')
-    if not url:
-        return
-    return url
+def merge_root_nodes(
+        main_doc: etree._Document, incoming_doc: etree._Document
+) -> etree._Element:
+    """Create a new document root tag that has the namespaces of both documents,
+    preferring the main document's nsmap. This is necessary because while
+    lxml will only copy namespaces over if they are used on tag names or
+    attribute names, and we also need to make sure that all namespace prefixes
+    for attribute *values* are copied over.
+    """
+    main_root, incoming_root = main_doc.getroot(), incoming_doc.getroot()
+    if main_root.tag != incoming_root.tag:
+        raise ValueError(
+            "Can't merge %s and %s root tags" % (main_root, incoming_root))
+    nsmap = incoming_root.nsmap # lxml returns us a copy, not an original
+    nsmap.update(main_root.nsmap)
+    new_root = etree.Element(
+        main_root.tag,
+        attrib=main_root.attrib,
+        nsmap=nsmap)
+    for ele in main_root.getchildren():
+        new_root.append(ele)
+    main_doc._setroot(new_root)
+    return new_root
+
+def inline_next_wsdl(loader : DocumentLoader, doc: etree._Document, url: str):
+    """Import the the next WSDL include tag if its url hasn't been already
+    TODO: Support importing other namespaces
+    """
+    root = doc.getroot()
+    imports = (
+        root.findall(f"{{{WSDL_NS}}}import") +
+        root.findall(f"{{{WSDL_NS}}}include"))
+    target_ns = root.attrib["targetNamespace"]
+    for imp in imports:
+        imp_url = None
+        imp_ns = None
+
+        if imp.tag == f"{{{WSDL_NS}}}include":
+            if imp.attrib["namespace"] != target_ns:
+                raise ValueError(
+                    "Namespace mismatch: %s vs %s",
+                    imp.attrib["namespace"], target_ns)
+        imp_ns = imp.attrib["namespace"]
+        try:
+            imp_url = imp.attrib.get("location")
+        except KeyError:
+            LOGGER.exception("include tag without location in %s", url)
+            raise
+
+        imp_doc, imp_url_out = loader.load_xml(imp_url)
+        if imp_doc is None:
+            imp.getparent().replace(imp, etree.Comment(etree.tostring(imp)))
+            return True, False
+        references = get_references(imp_doc)
+        fix_references(imp_doc, references, imp_url_out)
+
+        imp_root = imp_doc.getroot()
+        imp_doc_ns = imp_root.get("targetNamespace")
+        if imp_doc_ns and imp_doc_ns != imp_ns:
+            raise ValueError(
+                "Asked to import %s:%s into %s:%s" % (
+                    imp_url_out, imp_doc_ns, url, target_ns
+                )
+            )
+        if imp_doc_ns != target_ns:
+            ## TODO: assign targetNamespaces in first pass, then
+            ## do a name fix after all recursion is over
+            # imp_ele.attrib["targetNamespace"] = imp_doc_ns
+            LOGGER.warning(
+                "Skipping WSDL import %s:%s for %s:%s # TODO",
+                imp_url_out, imp_doc_ns, url, target_ns)
+            imp.addprevious(etree.Comment(
+                "Not imported (%s != %s)", imp_doc_ns, target_ns))
+            return True, False
+        root = merge_root_nodes(doc, imp_doc)
+        children = imp_root.getchildren() or []
+        for imp_ele in reversed(children):
+            imp.addnext(imp_ele)
+        imp.addprevious(etree.Comment("Imported into same namespace:"))
+        imp.getparent().replace(imp, etree.Comment(etree.tostring(imp)))
+        return True, True
+    return False, False
+
+def inline_references(function, description, loader, doc, url):
+    """Attempt to import all XSD files directly into the document
+
+    Return value is a tuple - the first value is the number of XSD import
+    tags modified, and the second is the number of unique files actually
+    imported."""
+    run = True
+    modified, imported = 0, 0
+    while run:
+        run, new = function(loader, doc, url)
+        if run:
+            modified += 1
+        if new:
+            imported += 1
+    LOGGER.info(
+        "%s: imported %u %s files, modified %u tags",
+        url, imported, description, modified)
+    return modified, imported
 
 def inline_next_xsd(loader, doc, uri):
     """
@@ -191,10 +309,10 @@ def inline_next_xsd(loader, doc, uri):
     the second value indicates if a document was imported or included.
     """
     schemas = doc.getroot().findall(
-        ".//{http://www.w3.org/2001/XMLSchema}schema")
+        f".//{{{XSD_NS}}}schema")
     for schema in schemas:
         # Process the next import, removing the "schemaLocation" attribute.
-        imports = schema.findall("{http://www.w3.org/2001/XMLSchema}import")
+        imports = schema.findall(f"{{{XSD_NS}}}import")
         for imp in imports:
             imp_url = imp.attrib.pop("schemaLocation", None)
             if imp_url is None:
@@ -203,18 +321,18 @@ def inline_next_xsd(loader, doc, uri):
             if imp_doc is None:
                 return True, False
             references = get_references(imp_doc)
-            fix_references(references, imp_url_out)
+            fix_references(imp_doc, references, imp_url_out)
             tag_namespace = imp.attrib.get(
                 "namespace",
-                imp.getparent().attrib.get("targetNamespace", None))
+                imp.getparent().attrib.get("targetNamespace"))
             imp_root = imp_doc.getroot()
-            imp_namespace = imp_root.attrib.get("targetNamespace", None)
+            imp_namespace = imp_root.attrib.get("targetNamespace")
             schema.addprevious(imp_doc.getroot())
             return True, True
 
         # Process the next include, removing the include tag and replacing
         # it with the XSD content
-        includes = schema.findall("{http://www.w3.org/2001/XMLSchema}include")
+        includes = schema.findall(f"{{{XSD_NS}}}include")
         for inc in includes:
             inc_url = inc.attrib.get("schemaLocation", None)
             if inc_url is None:
@@ -229,49 +347,32 @@ def inline_next_xsd(loader, doc, uri):
                 inc.getparent().replace(inc, etree.Comment(etree.tostring(inc)))
                 return True, False
             references = get_references(inc_doc)
-            fix_references(references, inc_url_out)
-            children = inc_doc.getroot().getchildren()
-            if children is not None:
-                for element in reversed(children):
-                    inc.addnext(element)
+            fix_references(inc_doc, references, inc_url_out)
+            children = inc_doc.getroot().getchildren() or []
+            for element in reversed(children):
+                inc.addnext(element)
             inc.getparent().replace(inc, etree.Comment(etree.tostring(inc)))
             return True, True
     return False, False
 
-
 def inline_xsd_references(loader, doc, url):
-    """Attempt to import all XSD files directly into the document
+    return inline_references(inline_next_xsd, "XSD", loader, doc, url)
 
-    Return value is a tuple - the first value is the number of XSD import
-    tags modified, and the second is the number of unique files actually
-    imported."""
-    run = True
-    modified, imported = 0, 0
-    while run:
-        run, new = inline_next_xsd(loader, doc, url)
-        if run:
-            modified += 1
-        if new:
-            imported += 1
-    LOGGER.info(
-        "%s: imported %u XSD files, modified %u XSD import/include tags",
-        url, imported, modified)
-    return modified, imported
-
+def inline_wsdl_references(loader, doc, url):
+    return inline_references(inline_next_wsdl, "WSDL", loader, doc, url)
 
 def wsdl2dom(url: str, client_cert=None, keep_clark=False, zeep=False):
     "Convert the WSDL at `url` to a single DOM tree"
-    session = Session()
-    if client_cert:
-        session.cert = client_cert
-    loader = ClarkDocumentLoader()
+    session = Session(cert=client_cert)
+    loader = ClarkDocumentLoader(session=session)
     doc, url_out = loader.load_xml(url)
     references = get_references(doc)
-    fix_references(references, url_out)
+    fix_references(doc, references, url_out)
+    inline_wsdl_references(loader, doc, url_out)
     inline_xsd_references(loader, doc, url_out)
     if zeep:
         elements = z.replace_refs(doc.getroot())
-        LOGGER.info("Made %u elements compatible with Zeep", elements)      
+        LOGGER.info("Made %u elements compatible with Zeep", elements)
     if not keep_clark:
         declark(doc.getroot())
     return doc

@@ -16,7 +16,7 @@ setup(
     install_requires=read_requirements("requirements.txt"),
     entry_points={
         'console_scripts': [
-            'wsdl2file = wsdl2file.cmd:main'
+            'wsdl2file = wsdl2file.command:main'
         ]
     },
     packages = ["wsdl2file"]
