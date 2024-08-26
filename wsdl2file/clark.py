@@ -1,31 +1,43 @@
 from lxml import etree
+import logging
 import re
 
+from wsdl2file.const import WSDL_NS, XSD_NS
+
+LOGGER = logging.getLogger(__name__)
+
 xmlschema_attribute_map = {
-    "{http://www.w3.org/2001/XMLSchema}attribute": ["type", "ref"],
-    "{http://www.w3.org/2001/XMLSchema}attributeGroup": ["ref"],
-    "{http://www.w3.org/2001/XMLSchema}element": [
+    f"{{{XSD_NS}}}attribute": ["type", "ref"],
+    f"{{{XSD_NS}}}attributeGroup": ["ref"],
+    f"{{{XSD_NS}}}element": [
         "type", "substitutionGroup", "ref",
         "{http://release.niem.gov/niem/appinfo/4.0/}appliesToTypes"],
-    "{http://www.w3.org/2001/XMLSchema}extension": ["base"],
-    "{http://www.w3.org/2001/XMLSchema}restriction": ["base"],
-    "{http://schemas.xmlsoap.org/wsdl/}part": ["element"],
-    "{http://schemas.xmlsoap.org/wsdl/}input": ["message"],
-    "{http://schemas.xmlsoap.org/wsdl/}output": ["message"],
-    "{http://schemas.xmlsoap.org/wsdl/}binding": ["type"],
+    f"{{{XSD_NS}}}extension": ["base"],
+    f"{{{XSD_NS}}}restriction": ["base"],
+    f"{{{WSDL_NS}}}part": ["element"],
+    f"{{{WSDL_NS}}}input": ["message"],
+    f"{{{WSDL_NS}}}output": ["message"],
+    f"{{{WSDL_NS}}}binding": ["type"],
 }
 
+
 def declark_tag(tag, attr_names):
+    pmap = {v: k for k, v in tag.nsmap.items()}
     for attr_name in attr_names:
         if attr_name in tag.attrib:
-            pmap = {v: k for k, v in tag.nsmap.items()}
             cids = tag.attrib[attr_name].split(' ')
             ids = []
             for cid in cids:
                 match = re.match(r'^{(.+?)}(.+)$', cid)
                 ns = match.group(1)
                 attr = match.group(2)
-                prefix = pmap[ns]
+                try:
+                    prefix = pmap[ns]
+                except KeyError as e:
+                    LOGGER.error(
+                        "Couldn't find prefix to declark: %s:%s",
+                        etree.tostring(tag), attr_name)
+                    raise
                 if prefix == None:
                     ids.append(attr)
                 else:
