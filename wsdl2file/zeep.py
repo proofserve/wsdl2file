@@ -16,15 +16,15 @@ import logging
 from pathlib import Path
 from lxml import etree
 
+from wsdl2file.const import NIEM_NS, XSD_NS
+
 LOGGER = logging.getLogger(__name__)
 
-XSD = "http://www.w3.org/2001/XMLSchema"
-NC = "http://release.niem.gov/niem/niem-core/4.0/"
 # list of lists, each list [selector -> new_ref_attribute]
 REF_TRANSFORMATIONS = [
     [
-        f".//{{{XSD}}}complexType[@name='DateType']//{{{XSD}}}element[@ref='{{{NC}}}DateRepresentation']",
-        f"{{{NC}}}DateTime"
+        f".//{{{XSD_NS}}}complexType[@name='DateType']//{{{XSD_NS}}}element[@ref='{{{NIEM_NS}}}DateRepresentation']",
+        f"{{{NIEM_NS}}}DateTime"
     ]
 ]
 
