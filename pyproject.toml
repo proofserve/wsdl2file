@@ -1,19 +1,23 @@
 [build-system]
-requires = ["setuptools>=61.0"]
+requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"
 
+[tool.setuptools.dynamic]
+dependencies = {file = ["requirements.txt"]}
+
 [project]
+dynamic = ["dependencies", "scripts"]
 name = "wsdl2file"
 version = "0.1"
 authors = [
-  { "name"="Tyler MacDonald", email="tyler@macdonald.name" }
+  { "name"="Tyler MacDonald", email="tyler@macdonald.name" },
 ]
 description = "Reduce a Web Services Definition (WSDL) down to a single file"
 readme = "README.md"
 requires-python = ">=3.9"
 classifiers = [
     "Programming Language :: Python :: 3",
-    "License :: OSI Approved :: MIT License",
+    "License :: OSI Approved :: Apache Software License",
     "Operating System :: OS Independent",
 ]
 
