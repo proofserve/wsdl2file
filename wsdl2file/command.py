@@ -24,7 +24,6 @@ if __name__ == "__main__":
 
 from wsdl2file.clark import clark, declark
 from wsdl2file.const import WSDL_NS, XSD_NS
-import wsdl2file.zeep as z
 
 
 LOGGER = logging.getLogger()
@@ -58,9 +57,6 @@ class ArgumentParser(argparse.ArgumentParser):
         # re-namespacing them
         self.add_argument(
             "--keep-clark", action='store_true', help=argparse.SUPPRESS)
-        self.add_argument(
-            "--zeep", action='store_true',
-            help="Attempt to make compatible with zeep")
 
     def parse_args(self, *args, **kwargs):
         options = super().parse_args(*args, **kwargs)
@@ -361,7 +357,7 @@ def inline_xsd_references(loader, doc, url):
 def inline_wsdl_references(loader, doc, url):
     return inline_references(inline_next_wsdl, "WSDL", loader, doc, url)
 
-def wsdl2dom(url: str, client_cert=None, keep_clark=False, zeep=False):
+def wsdl2dom(url: str, client_cert=None, keep_clark=False):
     "Convert the WSDL at `url` to a single DOM tree"
     session = Session(cert=client_cert)
     loader = ClarkDocumentLoader(session=session)
@@ -370,9 +366,6 @@ def wsdl2dom(url: str, client_cert=None, keep_clark=False, zeep=False):
     fix_references(doc, references, url_out)
     inline_wsdl_references(loader, doc, url_out)
     inline_xsd_references(loader, doc, url_out)
-    if zeep:
-        elements = z.replace_refs(doc.getroot())
-        LOGGER.info("Made %u elements compatible with Zeep", elements)
     if not keep_clark:
         declark(doc.getroot())
     return doc
@@ -387,8 +380,7 @@ def main(args=None):
     doc = wsdl2dom(
         options.url,
         client_cert=options.client_cert,
-        keep_clark=options.keep_clark,
-        zeep=options.zeep)
+        keep_clark=options.keep_clark)
     etree.indent(doc, space=' ', level=2)
     print(etree.tostring(doc.getroot()).decode())
     return(0)

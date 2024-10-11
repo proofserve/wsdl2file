@@ -12,7 +12,10 @@ setup(
     author="Tyler MacDonald",
     author_email="tyler@proofserve.com",
     description="Compile a WCF WSDL down to a single file",
-    license="MIT License",
+    license="Apache 2.0",
+    # https://stackoverflow.com/questions/9977889/how-to-include-license-file-in-setup-py-script#comment108118441_48691876
+    license_file="LICENSE-2.0.txt",
+    license_files=("LICENSE-2.0.txt",),
     install_requires=read_requirements("requirements.txt"),
     entry_points={
         'console_scripts': [
