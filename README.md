@@ -37,7 +37,9 @@ wsdl2file "https://is.courts.state.mn.us/Prod/WebServices/ElectronicCourtFiling/
 ## Ownership
 
 Written by Tyler MacDonald <tyler@macdonald.name>
+
 Copyright 2024 [https://www.proofserve.com/](Proof Technology, Inc.)
 
 This is free software released under the Apache license, Version 2.0.
+
 [https://github.com/proofserve/wsdl2file]
